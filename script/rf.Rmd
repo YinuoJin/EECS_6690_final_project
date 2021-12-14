@@ -1,0 +1,62 @@
+---
+title: "naivebayes_multi"
+author: "Xingyu Wu"
+date: "12/5/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+data = read.csv("../data/processed_counts.csv")
+```
+
+```{r}
+label = read.csv("../data/annotation.csv")
+```
+
+```{r}
+label$Type[which(label$Type == "Normal")] <- 0
+label$Type[which(label$Type != 0)] <- 1
+```
+
+
+```{r}
+library(sampling)
+set.seed(6690)
+
+train_id <- sample(label$ID, round(dim(label)[1]*0.75))
+
+train_data <- data[data$ID %in% train_id, ]
+test_data <- data[!(data$ID %in% train_id), ]
+
+train_label <- label[data$ID %in% train_id, ]
+test_label <- label[!(data$ID %in% train_id), ]
+```
+
+```{r}
+total_train = merge(train_data, train_label, by = "ID")
+total_test = merge(test_data, test_label, by = "ID")
+total_train = total_train[, -1]
+total_test = total_test[, -1]
+```
+
+```{r}
+library(ggplot2)
+library(lattice)
+library(caret)
+control <- trainControl(method = 'repeatedcv', number = 2, repeats = 2)
+model <- train(Type~., total_train, 
+               method = 'rf',
+               preProcess = c('center', 'scale'),
+               trControl = control)
+model
+```
+
+```{r}
+truth <- total_test$Type
+pred <- predict(model, newdata = total_test)
+confusionMatrix(table(pred, truth))
+```

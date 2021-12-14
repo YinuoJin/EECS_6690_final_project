@@ -1,0 +1,74 @@
+---
+title: "randomforest"
+author: "Yunhe Liu"
+date: "2021/12/13"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+data = read.csv("../data/processed_counts.csv")
+label = read.csv("../data/annotation.csv")
+library(sampling)
+library(Matrix)
+library(ggplot2)
+library(lattice)
+library(caret)
+library(randomForest)
+set.seed(6690)
+
+train_id <- sample(label$ID, round(dim(label)[1]*0.75))
+
+train_data <- data[data$ID %in% train_id, ]
+test_data <- data[!(data$ID %in% train_id), ]
+
+train_label <- label[data$ID %in% train_id, ]
+test_label <- label[!(data$ID %in% train_id), ]
+```
+
+```{r}
+total_train = merge(train_data, train_label, by = "ID")
+total_test = merge(test_data, test_label, by = "ID")
+total_train = total_train[, -1]
+total_test = total_test[, -1]
+total_train$Type = factor(total_train$Type)
+total_test$Type = factor(total_test$Type)
+load("mmm.RData")
+```
+
+```{r}
+library(party)
+importance <- varImp(model, scale = FALSE)
+importance
+```
+
+```{r}
+library(mltools)
+truth <- total_test$Type
+pred <- predict(model, newdata = total_test)
+mcc <- mcc(pred, truth)
+mcc
+```
+
+```{r}
+cm<-confusionMatrix(table(pred, truth))
+table <- data.frame(cm$table)
+q <- ggplot(table, aes(truth, pred, fill= Freq)) +
+  geom_tile(aes(fill = Freq), colour = "black") +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="purple") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels = model$level) +
+  scale_y_discrete(labels = model$level) +
+  ggtitle("Multi classification by randomforest") +
+  theme(plot.title = element_text(hjust = 0.5),
+  axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5))
+q
+```

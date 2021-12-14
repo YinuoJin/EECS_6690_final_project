@@ -1,0 +1,118 @@
+---
+title: "KNN_Muti"
+author: "Yiyang Ni"
+date: "2021/12/4"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+data = read.csv("../data/processed_counts.csv")
+```
+
+```{r}
+label = read.csv("../data/annotation.csv")
+```
+
+
+```{r}
+library(sampling)
+set.seed(6690)
+
+train_id <- sample(label$ID, round(dim(label)[1]*0.75))
+
+train_data <- data[data$ID %in% train_id, ]
+test_data <- data[!(data$ID %in% train_id), ]
+
+train_label <- label[data$ID %in% train_id, ]
+test_label <- label[!(data$ID %in% train_id), ]
+```
+
+```{r}
+total_train = merge(train_data, train_label, by = "ID")
+total_test = merge(test_data, test_label, by = "ID")
+total_train = total_train[, -1]
+total_test = total_test[, -1]
+total_train$Type = factor(total_train$Type)
+total_test$Type = factor(total_test$Type)
+```
+
+```{r}
+library(ggplot2)
+library(lattice)
+library(caret)
+```
+
+
+```{r}
+control <- trainControl(method = 'cv', number = 10, allowParallel = TRUE)
+model <- train(Type~., total_train, 
+               method = 'knn',
+               preProcess = c('center', 'scale'),
+               trControl = control, 
+               tuneLength = 1)
+```
+
+```{r}
+model = readRDS("modelknn_multi.rds")
+model
+```
+
+
+```{r}
+truth <- total_test$Type
+pred <- predict(model, newdata = total_test)
+CM = confusionMatrix(table(pred, truth))
+CM
+```
+
+```{r}
+importance <- varImp(model, scale = FALSE)
+importance
+```
+
+```{r}
+index <- importance$importance
+for(i in 1:16){
+  index1 <- head(index[order(index[,i],decreasing = TRUE),],n=20)
+  print(colnames(index1[i]))
+  print(rownames(index1))
+}
+
+
+```
+
+```{r}
+library(mccr)
+mccr(truth, pred)
+```
+
+```{r}
+# saveRDS(model, file = "modelknn_multi.rds")
+```
+
+```{r}
+library(mltools)
+mcc(pred, truth)
+```
+
+```{r}
+table <- data.frame(CM$table)
+q <- ggplot(table, aes(truth, pred, fill= Freq)) +
+  geom_tile(aes(fill = Freq), colour = "black") +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="purple") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels = colnames(index)) +
+  scale_y_discrete(labels = colnames(index)) +
+  ggtitle("Multi classification by KNN") +
+  theme(plot.title = element_text(hjust = 0.5),
+  axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5))
+q
+```
+

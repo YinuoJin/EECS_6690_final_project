@@ -1,0 +1,647 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+in---
+title: "Neural_networks"
+author: "Yinuo Jin"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+### Load required library & dataset
+```{r}
+library(torch)
+library(hash)
+library(caret)
+library(ggplot2)
+library(dplyr)
+```
+
+
+```{r}
+data_path <- "../data/"
+```
+
+
+```{r}
+data <- read.csv(paste0(data_path, "processed_counts.csv"))
+# head(data)
+```
+
+
+
+```{r}
+label <- read.csv(paste0(data_path, "annotation.csv"))
+# head(label)
+```
+
+
+### Feed-forward Neural Networks with 2 hidden layer (built with Torch)
+```{r}
+# Map str labels to integers
+encoding <- function(labels) {
+  dict <- hash()
+  unique_labels <- sort(unique(labels))
+  for (i in 1:length(unique_labels)){
+    l <- unique_labels[i]
+    dict[[l]] <- i
+  }
+  
+  # if one-hot encoding
+  # encoded <- matrix(data = 0, nrow = length(labels), ncol = length(unique_labels))
+  #
+  # for (i in seq(1, length(labels))) {
+  #   encoded[i, dict[[labels[i]]]] <- 1
+  #
+  # return (encoded)
+  
+  return (as.integer(lapply(labels, function(x) dict[[x]])))
+
+}
+
+label_binary <- ifelse(label$Type != "Normal", 1, 0) # binary classification; 0 - normal; 1 - cancerous
+label_multi <- encoding(label$Type) # multi-label classification
+```
+
+
+### Train-test split
+```{r}
+set.seed(6690)
+
+train_idxs <- sample(seq(1:nrow(label)), size = round(nrow(label)) * 0.75)
+total_train <- data[train_idxs, ]
+total_test <- data[-train_idxs, ]
+
+x_total <- torch_tensor(as.matrix(data[-1]), dtype = torch_float())
+y_total_binary <- torch_tensor(as.double(as.matrix(label_multi)), dtype = torch_float())
+y_total_multi <- torch_tensor(as.double(as.matrix(label_multi)), dtype = torch_long())
+
+x_train <- torch_tensor(as.matrix(total_train[, -1]), dtype = torch_float())
+x_test <- torch_tensor(as.matrix(total_test[, -1]), dtype = torch_float())
+
+y_train_binary <- torch_tensor(as.double(as.matrix(label_binary[train_idxs])), dtype = torch_float())
+y_test_binary <- torch_tensor(as.double(as.matrix(label_binary[-train_idxs])), dtype = torch_float())
+y_train_multi <- torch_tensor(as.double(as.matrix(label_multi[train_idxs])), dtype = torch_long())
+y_test_multi <- torch_tensor(as.double(as.matrix(label_multi[-train_idxs])), dtype = torch_long())
+```
+
+
+### Model
+Vanilla model (flexibly with specified input & output channels)
+```{r}
+# Reference:
+# https://anderfernandez.com/en/blog/how-to-create-neural-networks-with-torch-in-r/
+net <- nn_module(
+  initialize = function(c_in, c_out, p = 0.2) {
+    self$c_out <- c_out
+    self$layer1 <- nn_sequential(
+      nn_linear(c_in, 128),
+      nn_relu(inplace = TRUE),
+      nn_dropout(p = p)
+    )
+    
+    self$layer2 <- nn_sequential(
+      nn_linear(128, 64),
+      nn_relu(inplace=TRUE),
+      nn_dropout(p = p)
+    )
+    
+    self$layer3 <- nn_sequential(
+      nn_linear(64, c_out),
+    )
+  },
+  
+  forward = function(x) {
+    if (self$c_out == 1) {
+      x %>% 
+        self$layer1() %>%
+        self$layer2() %>%
+        self$layer3() %>%
+        torch_flatten()
+    } else{
+      x %>%
+        self$layer1() %>%
+        self$layer2() %>%
+        self$layer3() %>% 
+        nnf_softmax(dim = -1)
+    }
+  }
+)
+
+```
+
+
+Sequential Model (fixed input & output features in declaration; simple for DeepLIFT explanation)
+```{r}
+c_in <- ncol(x_train)
+c_out <- length(unique(label_multi))
+
+# The following module has reference & is taken from:
+# https://cran.r-project.org/web/packages/innsight/vignettes/innsight.html
+nn_flatten <- nn_module(
+  classname = "nn_flatten",
+  initialize = function(start_dim = 1, end_dim = -1) {
+    self$start_dim <- start_dim
+    self$end_dim <- end_dim
+  },
+  forward = function(x) {
+    torch_flatten(x, start_dim = self$start_dim, end_dim = self$end_dim)
+  }
+)
+
+# Sequential model for binary classification
+SeqNet.bin <- nn_sequential(
+  nn_linear(c_in, 128),
+  nn_relu(inplace = TRUE),
+  nn_dropout(0.2),
+  
+  nn_linear(128, 64),
+  nn_relu(inplace = TRUE),
+  nn_dropout(0.2),
+  
+  nn_linear(64, 1),
+  nn_flatten(),
+)
+
+# Sequential model for pan-cancer classification
+SeqNet.pan <- nn_sequential(
+  nn_linear(c_in, 256),
+  nn_relu(inplace = TRUE),
+  nn_dropout(0.2),
+  
+  nn_linear(256, 128),
+  nn_relu(inplace = TRUE),
+  nn_dropout(0.2),
+  
+  nn_linear(128, 64),
+  nn_relu(inplace = TRUE),
+  nn_dropout(0.2),
+  
+  nn_linear(64, c_out),
+  nn_softmax(dim = -1)
+)
+
+```
+
+
+```{r}
+res_bin$model
+```
+```{r}
+res_pan$model
+```
+
+
+
+```{r}
+# Wrapper for model training
+calcWeights <- function(y_train) {
+  freq <- table(as.integer(y_train))
+  weight <- sum(freq) / freq
+  return (weight / min(weight))
+}
+
+
+# Calculate Matthews Correlation Coefficients (MCC)
+calcMCC <- function(cm, is_binary = TRUE, eps = 1e-5) {
+  if (is_binary) {
+    tn <- cm[1, 1]
+    fn <- cm[1, 2]
+    fp <- cm[2, 1]
+    tp <- cm[2, 2]
+    
+    d <-sqrt(tp+fp) * sqrt(tp+fn) * sqrt(tn+fp) * sqrt(tn+fn) + eps
+    mcc <- (tp * tn - fp * fn) / d
+  } else {
+    t <- rowSums(cm)  # tot. samples in each category
+    p <- diag(cm)     # tot. correct predicted. samples in each category
+    s <- sum(cm)      # tot. samples in data
+    c <- sum(p)       # tot. corrected samples
+    
+    n <- c * s - sum(p * t)
+    d <- sqrt( (s^2  - sum(p^2)) * (s^2 - sum(t^2)) ) + eps
+    mcc <- n / d
+  }
+  
+  return (mcc)
+}
+
+
+trainModel <- function(x_train, y_train, c_in, epochs = 5, lr = 0.01, drop_rate = 0.2) {
+  n_unique <- length(unique(as.integer(y_train)))
+  c_out <- ifelse(n_unique == 2, 1, n_unique)
+  print(paste("Output dimension:", c_out))
+
+  model <- net(c_in, c_out, drop_rate)
+  losses <- c()
+  weights <- calcWeights(y_train)
+  
+  if (c_out == 1) {
+    criterion <- nn_bce_with_logits_loss()
+  } else {
+    criterion <- nn_cross_entropy_loss(weight = weights)
+  }
+  
+  optimizer <- optim_adam(model$parameters, lr = lr)
+    
+  for (i in 1:epochs) { 
+    optimizer$zero_grad()
+    
+    y_pred <- model(x_train)
+    loss = criterion(y_pred, y_train)
+    loss$backward()
+    optimizer$step()
+    
+    # training-log
+    if (i %% 10 == 0) {
+      if (c_out == 1) {
+        y_pred_binary <- ifelse(y_pred > 0.5, 1, 0)
+        acc <- (y_pred_binary == y_train)$sum()$item() / y_train$size()
+      }
+      else {
+        y_pred_cat <- y_pred %>% torch_argmax(dim = 2)
+        acc <- (y_pred_cat == y_train)$sum()$item() / y_train$size()
+      }
+      print(paste0("Epoch=", i, " Loss=", loss$item(), " Acc=", acc))
+      losses <- append(losses, loss$item())
+    }
+  }  
+  
+  return (list(model = model, losses = losses))
+}
+
+trainSeqModel <- function(x_train, y_train, model, epochs = 5, lr = 0.01, is_binary = TRUE) {
+  losses <- c()
+  
+  if (is_binary) {
+    criterion <- nn_bce_with_logits_loss()
+  } else{
+    weights <- calcWeights(y_train)
+    criterion <- nn_cross_entropy_loss(weight = weights) 
+  }
+  
+  optimizer <- optim_adam(model$parameters, lr = lr)
+  
+  for (i in 1:epochs) {
+    optimizer$zero_grad()
+    y_pred <- model(x_train)
+
+    loss <- criterion(y_pred, y_train)
+    loss$backward()
+    optimizer$step()
+
+    if (i %% 10 == 0) {
+      if (is_binary) {
+        y_pred_binary <- ifelse(y_pred > 0.5, 1, 0)
+        acc <- (y_pred_binary == y_train)$sum()$item() / y_train$size()    
+      } else {
+        y_pred_cat <- y_pred %>% torch_argmax(dim = 2)
+        acc <- (y_pred_cat == y_train)$sum()$item() / y_train$size()
+      }
+      print(paste0("Epoch=", i, " Loss=", loss$item(), " Acc=", acc))
+      losses <- append(losses, loss$item())
+    }  
+  }
+
+  return (list(model = model, losses = losses))
+}
+```
+
+
+Helper functions for visualization
+```{r}
+# Print confusion matrix
+printConfusionMat <- function(y_true, y_pred, name, perc = FALSE) {
+  true <- as.integer(y_true)
+  pred <- as.integer(y_pred)
+  mat <- table(factor(pred, levels=min(true):max(true)),
+               factor(true, levels=min(true):max(true)))
+               
+  if (perc) {
+    mat <- round(sweep(mat, 2, rowSums(mat), FUN = '/'), digits = 2)
+  }
+  row.names(mat) <- name
+  colnames(mat) <- name
+  
+  return (mat)
+}
+
+#' Visualize confusion matrix
+#' Reference: 
+#' https://stackoverflow.com/questions/37897252/plot-confusion-matrix-in-r-using-ggplot 
+#' 
+#' @y_true torch.Tensor ground-truth labels
+#' @y_pred predictions
+#' @name character of label names
+#' @perc whether to show matrix in perentage
+#' @title figure title
+visualizeConfusionMat <- function(y_true, y_pred, name, perc = FALSE, savefig = TRUE,
+                                  title = NULL) {
+  y.true <- as.integer(y_true)
+  y.pred <- as.integer(y_pred)
+  
+  cm <- confusionMatrix(factor(y.pred), factor(y.true), dnn = c("prediction", "reference"))
+  
+  if (perc) {
+    plt <- as.data.frame(
+      round(sweep(cm$table, 2, rowSums(cm$table), FUN = '/'), digits = 2)
+    )
+  } else {
+    plt <- as.data.frame(cm$table)
+  }
+  
+  plt$prediction <- factor(plt$prediction, levels=rev(levels(plt$prediction)))
+  
+  q <- ggplot(plt, aes(reference, prediction, fill= Freq)) +
+        geom_tile(aes(fill = Freq), colour = "black") + 
+        geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="purple") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels = name) +
+        scale_y_discrete(labels = rev(name)) + 
+        ggtitle(title) + 
+        theme(plot.title = element_text(hjust = 0.5),
+              axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5))
+  
+  return (q)
+}
+```
+
+
+```{r}
+# Load saved model params
+SeqNet.bin$load_state_dict(torch_load("../models/nn_bin.pt"))
+res_bin <- list()
+res_bin$model <- SeqNet.bin
+
+SeqNet.pan$load_state_dict(torch_load("../models/nn_multi.pt"))
+res_pan <- list()
+res_pan$model <- SeqNet.pan
+
+```
+
+
+#### (1). Binary prediction (tumor vs. normal)
+```{r}
+res_bin <- trainSeqModel(
+  x_train = x_train,
+  y_train = y_train_binary,
+  model = SeqNet.bin,
+  epochs = 50,
+  lr = 0.001
+)
+```
+
+
+#### Prediction on test set
+```{r}
+y_pred <- ifelse(res_bin$model(x_test) > 0.5, 1, 0)
+acc_test <- (y_pred == y_test_binary)$sum()$item() / y_test_binary$size()
+cat(paste("Acc:", acc_test))
+```
+
+
+#### Confusion matrix
+```{r}
+mat <- printConfusionMat(y_test_binary, y_pred, name = c("Normal", "Cancer"))
+mat.perc <- printConfusionMat(y_test_binary, y_pred, name = c("Normal", "Cancer"), perc = TRUE)
+mcc <- calcMCC(mat)
+cat(paste("Mcc:", mcc))
+```
+
+
+```{r fig.width = 4, fig.height = 3}
+q.bin <- visualizeConfusionMat(y_test_binary, y_pred, 
+                           name = c("Normal", "Tumor"),
+                           title = "Binary classification")
+q.bin
+```
+
+```{r}
+ggsave("../figures/nn_cm_bin.png", q.bin, width = 4, height = 3.5)
+```
+
+
+#### (2). Multi-label classification (pan-cancer)
+```{r}
+res_pan <- trainSeqModel(
+  x_train = x_train,
+  y_train = y_train_multi,
+  model = SeqNet.pan,
+  epochs = 400,
+  lr = 0.001,
+  is_binary = FALSE
+)
+```
+
+
+#### Prediction on test set 
+```{r}
+y_pred <- res_pan$model(x_test) %>% torch_argmax(dim = 2)
+acc <- (y_pred == y_test_multi)$sum()$item() / y_test_multi$size()
+acc
+```
+
+#### Confusion matrix
+```{r}
+mat <- printConfusionMat(y_test_multi, y_pred, name = sort(unique(label$Type)))
+mat.perc <- printConfusionMat(y_test_multi, y_pred, name = sort(unique(label$Type)), perc = TRUE)
+mcc <- calcMCC(mat, is_binary = FALSE)
+mcc
+```
+
+
+```{r fig.width = 8, fig.height = 8}
+q.pan <- visualizeConfusionMat(y_test_multi, y_pred, 
+                           name = sort(unique(label$Type)),
+                           title = "Pan-cancer classification")
+q.pan
+```
+
+
+```{r}
+ggsave("../figures/nn_cm_multi.png", q.pan, width = 8, height = 8)
+```
+
+
+
+### Save model
+```{r}
+#torch_save(res_bin$model$state_dict(), path = "../models/nn_bin.pt")
+#torch_save(res_pan$model$state_dict(), path = "../models/nn_multi.pt")
+torch_save(res_bin$model, path = "../models/nn_bin.rt")
+torch_save(res_pan$model, path = "../models/nn_pan.rt")
+```
+
+
+### Model explanation
+```{r}
+library(innsight)
+library(gridExtra)
+```
+
+
+#### Extract pan-classification network features 
+```{r}
+conv.pan <- Converter$new(res_pan$model, input_dim = c_in,
+                          input_names = list(colnames(data)[-1]),
+                          output_names = list(sort(unique(label$Type)))
+)
+dl.pan <- DeepLift$new(conv.pan, x_train)
+dl_res.arr <- dl.pan$get_result()
+```
+
+For each gene, select top 20 genes for such prediction
+```{r}
+pred_labels <- as.integer(res_pan$model(x_train) %>% torch_argmax(dim = 2))
+unique_labels <- sort(unique(label$Type))
+
+features <- list()
+feature_idxs <- list()
+
+for (i in seq(1:16)) {
+  print(paste0("Extracting features for ", unique_labels[i], "..."))
+  idxs <- which(pred_labels == i)
+  curr_dl <- dl_res.arr[idxs, , ]
+  curr_dl.avg <- apply(curr_dl, c(2,3), mean)
+  names(curr_dl.avg) <- unique_labels
+  
+  curr_feature <- curr_dl.avg[,i]
+  features[[unique_labels[i]]] <- sort(curr_feature, decreasing = TRUE)[1:20]
+  feature_idxs[[unique_labels[i]]] <- order(curr_feature, decreasing = TRUE)[1:20]
+}
+```
+
+#### Barplots
+```{r}
+displayFeatures <- function(features, lbls) {
+  q_list <- list()
+  
+  for (i in seq(1:length(lbls))) {
+    lbl <- lbls[i]
+    
+    # Empty prediction for "Normal"
+    if (lbl == "Normal") {
+      next
+    }
+    
+    df_lbl <- as.data.frame(features[[lbl]])
+    df_lbl <- cbind(Gene = row.names(df_lbl), df_lbl)
+    rownames(df_lbl) <- 1:nrow(df_lbl)
+    names(df_lbl)[2] <- "DeepLIFT"
+    
+    if ( max(df_lbl[["DeepLIFT"]]) > 0.8 ) {
+      y.range <- c(0, max(df_lbl[["DeepLIFT"]]))
+    } else {
+      y.range <- c(0, 0.8)
+    }
+    
+    q <- ggplot(data = df_lbl, aes_string(x = "Gene", y = "DeepLIFT", fill = "DeepLIFT")) + 
+                geom_bar(stat = "identity") + 
+                scale_fill_gradient( low="white", high="darkred", limits = c(0, max(df_lbl[["DeepLIFT"]]) )) + 
+                ylim(y.range) + 
+                ggtitle(lbl) + 
+                theme(plot.title = element_text(hjust = 0.5),
+                axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5))
+    
+    q_list[[lbl]] <- q
+  }
+  
+  return (q_list)
+}
+```
+
+
+
+```{r fig.width = 24, fig.height = 18}
+q_list <- displayFeatures(features, unique_labels)
+do.call("grid.arrange", c(q_list, nrow = 5, ncol = 3))
+```
+
+```{r}
+q.summary <- do.call("arrangeGrob", c(q_list, nrow = 5, ncol = 3))
+ggsave("../figures/dl_summmary.png", q.summary, width = 20, height = 15)
+```
+
+
+Comparison of BRCA "feature" genes, random genes in BRCA & importance of "feature" genes in other Tumor expression
+```{r}
+# Helper function: set  index of dataframe back as the 1st col.
+reIndex <- function(df) {
+    df <- cbind(Gene = row.names(df), df)
+    rownames(df) <- 1:nrow(df)
+    names(df)[2] <- "DeepLIFT"
+    return (df)
+}
+
+brca_idxs <- which(pred_labels == 2)
+dl_brca <- dl_res.arr[brca_idxs, , ]
+dl_brca.avg <- apply(dl_brca, c(2,3), mean)
+names(dl_brca.avg) <- unique_labels
+
+brca_features <- dl_brca.avg[, 2]
+df_brca_top_features <- as.data.frame(
+  sort(brca_features, decreasing = TRUE)[1:20]
+)
+df_brca_top_features <- reIndex(df_brca_top_features)
+
+brca_top_idxs <- order(brca_features, decreasing = TRUE)[1:20]
+
+rand_idxs <- sample(1:length(brca_features), 20, replace = FALSE)
+df_brca_rand_features <- as.data.frame(
+  brca_features[rand_idxs]
+)
+df_brca_rand_features <- reIndex(df_brca_rand_features)
+```
+
+
+BRCA "feature gene" importance in Normal samples
+```{r}
+normal_idxs <- which(pred_labels == 10)
+dl_normal <- dl_res.arr[normal_idxs, ,]
+dl_normal.avg <- apply(dl_normal, c(2,3), mean)
+names(dl_normal.avg) <- unique_labels
+
+normal_features <- dl_normal.avg[, 8]
+df_normal_brca_features <- as.data.frame(
+  normal_features[brca_top_idxs]
+)
+df_normal_brca_features <- reIndex(df_normal_brca_features)
+```
+
+
+```{r}
+q.rand <- ggplot(data = df_brca_rand_features, aes_string(x = "Gene", y = "DeepLIFT", fill = "DeepLIFT")) +
+                 geom_bar(stat = "identity") + 
+                 scale_fill_gradientn(colours = colorspace::diverge_hcl(7), limits = c(-0.2, 0.2)) +
+                 ylim(c(-0.2, 0.8)) + 
+                 ggtitle("BRCA (rand genes)") + 
+                 theme(plot.title = element_text(hjust = 0.5),
+                       axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5))
+q.rand
+```
+
+
+```{r}
+q.n_br <- ggplot(data = df_normal_brca_features, aes_string(x = "Gene", y = "DeepLIFT", fill = "DeepLIFT")) +
+                 geom_bar(stat = "identity") + 
+                 scale_fill_gradientn(colours = colorspace::diverge_hcl(7), limits = c(-0.2, 0.2)) +
+                 ylim(c(-0.2, 0.8)) + 
+                 ggtitle("NORMAL (BRCA genes)") + 
+                 theme(plot.title = element_text(hjust = 0.5),
+                       axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5))
+q.n_br
+```
+
+```{r fig.width = 24, fig.height = 4}
+grid.arrange(q.rand, q.n_br, q_list$BRCA, ncol = 3)
+```
+
+```{r}
+q_brca <- arrangeGrob(q.rand, q.n_br, q_list$BRCA, ncol = 3)
+ggsave("../figures/dl_brca.png", q_brca, width = 20, height = 4)
+```
+
