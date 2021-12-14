@@ -1,14 +1,14 @@
-### EECS 6690 (Fall 2021)
+## EECS 6690 (Fall 2021)
 
 ---
 
-#### Overview
+### Overview
 
-#### Prerequisites
+### Prerequisites
 
-#### Directory
+### Directory
 
-#### References
+### References
 
 Kim, B. H., Yu, K., & Lee, P. C. (2020). Cancer classification of single-cell gene expression data by neural network. *Bioinformatics*, *36*(5), 1360-1366
 
