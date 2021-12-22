@@ -3,10 +3,16 @@
 ---
 
 ### Overview
+The Cancer Genome Atlas (TCGA) provides comprehensive sequencing information to associate genome mutations with specific cancer types. This project aims to utilize TCGA's RNA-seq dataset to perform pan-cancer classification aross 15 cancer types (plus normal), and further identify potential marker genes w.r.t. each cancer label.
 
 ### Prerequisites
-
+- R: `caret; torch`
+- Python: `scipy, pandas, scanpy`
 ### Directory
+- docs: generated documents (in PDF)
+- figures: figures generated from the analysis
+- paper: major works we reproduced / built upon
+- script: all analysis code 
 
 ### References
 

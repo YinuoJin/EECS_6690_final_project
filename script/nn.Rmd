@@ -333,11 +333,11 @@ printConfusionMat <- function(y_true, y_pred, name, perc = FALSE) {
 #' Reference: 
 #' https://stackoverflow.com/questions/37897252/plot-confusion-matrix-in-r-using-ggplot 
 #' 
-#' @y_true torch.Tensor ground-truth labels
-#' @y_pred predictions
-#' @name character of label names
-#' @perc whether to show matrix in perentage
-#' @title figure title
+#' @param y_true torch.Tensor ground-truth labels
+#' @param y_pred predictions
+#' @param name character of label names
+#' @param perc whether to show matrix in perentage
+#' @param title figure title
 visualizeConfusionMat <- function(y_true, y_pred, name, perc = FALSE, savefig = TRUE,
                                   title = NULL) {
   y.true <- as.integer(y_true)
